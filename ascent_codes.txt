@@ -1,20 +1,20 @@
-BOLT-1-SN001
+BOLT-F001
 155x155 km orbit
 python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 1 -udt 0 0 -hva 1150 -hpp 9700 -ppp 51 -fag 9 -l
 
-BOLT-1-SN002
+BOLT-F002
 210x2500 km orbit
 python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 2 -udt 0 0 -hva 1200 -hpp 10000 -ppp 53 -htg 210000 -etg 0.15 -fag 9
 
-BOLT-1-SN003
+BOLT-F003
 210x2500 km orbit
 python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 2 -udt 0 0 -hva 1200 -hpp 10000 -ppp 53 -htg 210000 -etg 0.15 -fag 9 -l
 
-BOLT-1-SN004
+BOLT-F004
 310x2700 km orbit
 python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 2 -udt 0 0 -edt 150 0 -hva 1200 -hpp 10000 -ppp 56 -htg 315000 -etg 0.15 -fag 9 -l
 
-BOLT-1A1-SN005
+BOLT-F005
 350x700 km orbit
 python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 2 -udt 0 0 -edt 200 0 -hva 1200 -hpp 10000 -ppp 58 -htg 350000 -etg 0.03 -fag 9 -l
 
