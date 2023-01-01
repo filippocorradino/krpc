@@ -107,7 +107,10 @@ class StagingThread(threading.Thread):
         self.stage_i_events = args.stage_i_events[ix_stage]
         self.stage_e_events = args.stage_e_events[ix_stage]
         self.ullage = args.ullage_times[ix_stage]
-        self.endstage = args.endstage_times[ix_stage]
+        try:
+            self.endstage = args.endstage_times[ix_stage]
+        except TypeError:
+            self.endstage = 0  # endstage wasn't defined
         self.ignited = False
         if not name:
             name = f'Stage {n_stage}'
