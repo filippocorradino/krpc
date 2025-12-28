@@ -18,8 +18,16 @@ BOLT-F005
 350x700 km orbit
 python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 2 -udt 0 0 -edt 200 0 -hva 1200 -hpp 10000 -ppp 58 -htg 350000 -etg 0.03 -fag 9 -l
 
+BOLT-F006
+155x155 km orbit polar
+python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 2 -udt 0 0 -hva 1200 -hpp 10000 -ppp 51 -htg 155000 -fag 9 -hdg 185
+
 vvv EXPERIMENTAL vvv
 
-BOLT-2
-210x1600 km orbit
-python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 1 -udt 0 0 -hva 1200 -hpp 10000 -ppp 53 -htg 210000 -etg 0.1 -fag 9 -l
+BOLT-F007
+305x305 km orbit
+python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 2 -udt 0 0 -edt 100 0 -hva 1200 -hpp 10000 -ppp 57 -htg 310000 -fag 9
+
+XH1
+Suborbital
+python3 ./ascent.py -tth 550000 20000 -sse 0 1 -sie 1 0 -see 1 1 -udt 0 0 -hva 1200 -hpp 10000 -ppp 60 -hdg 270

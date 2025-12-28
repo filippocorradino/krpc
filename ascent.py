@@ -12,7 +12,7 @@ import krpc
 G0 = 9.80665
 R_EARTH = 6371000
 MU_EARTH = 398600000000000
-T_PEG_CUTOFF = 25
+T_PEG_HARD_CUTOFF = 10
 
 
 class LoggingThread(threading.Thread):
@@ -42,7 +42,7 @@ class LoggingThread(threading.Thread):
 
 class SteeringThread(threading.Thread):
     
-    def __init__(self, conn, vessel, ut_stream, t0, A, B, C, T):
+    def __init__(self, conn, vessel, ut_stream, t0, A, B, C, T, hdg=90):
         super().__init__()
         self.conn = conn
         self.vessel = vessel
@@ -52,6 +52,7 @@ class SteeringThread(threading.Thread):
         self.B = B
         self.C = C
         self.T = T
+        self.hdg = hdg
 
     def run(self):
         while True:
@@ -59,15 +60,17 @@ class SteeringThread(threading.Thread):
             if dt >= self.T:
                 break
             pitch = asin(self.A + self.B*dt + self.C)
-            self.vessel.auto_pilot.target_pitch_and_heading(degrees(pitch), 90)
+            self.vessel.auto_pilot.target_pitch_and_heading(degrees(pitch), self.hdg)
             time.sleep(0.1)
     
-    def update(self, t0, A, B, C, T):
+    def update(self, t0, A, B, C, T, hdg=None):
         self.t0 = t0
         self.A = A
         self.B = B
         self.C = C
         self.T = T
+        if hdg is not None:
+            self.hdg = hdg
 
 
 class FairingThread(threading.Thread):
@@ -221,21 +224,26 @@ class Mission():
             self.logging_thread.join()
         exit()
 
-    def vertical_ascent(self, end_altitude):
+    def vertical_ascent(self, end_altitude, heading):
         while True:
             try:
-                h0 = self.altitude()
+                start_altitude = self.altitude()
                 break
             except StreamError:
                 print("Streamerror")
                 time.sleep(1)
+        vessel_bbox = self.vessel.bounding_box(self.vessel.reference_frame)
+        vessel_height = abs(vessel_bbox[0][1] - vessel_bbox[1][1])
         altitude = self.conn.get_call(getattr, self.vessel.flight(), 'mean_altitude')
         liftoff = self.conn.krpc.Expression.greater_than(
             self.conn.krpc.Expression.call(altitude),
-            self.conn.krpc.Expression.constant_double(h0+1))
+            self.conn.krpc.Expression.constant_double(start_altitude+1))
         altitude_target_reached = self.conn.krpc.Expression.greater_than(
             self.conn.krpc.Expression.call(altitude),
             self.conn.krpc.Expression.constant_double(end_altitude))
+        tower_clear = self.conn.krpc.Expression.greater_than(
+            self.conn.krpc.Expression.call(altitude),
+            self.conn.krpc.Expression.constant_double(start_altitude+vessel_height))
         # Liftoff
         self.vessel.control.sas = True
         self.vessel.auto_pilot.disengage()
@@ -248,15 +256,28 @@ class Mission():
         self.vessel.auto_pilot.engage()
         self.vessel.auto_pilot.target_pitch_and_heading(90, 90)
         self.vessel.control.sas = False
+        event = self.conn.krpc.add_event(tower_clear)
+        with event.condition:
+            event.wait()
+            print("Tower cleared")
+        # Linear roll program
+        print("Roll program")
+        while True:
+            altitude = self.altitude()
+            k = ((altitude-start_altitude) / (end_altitude-start_altitude))**.5 * 1.1
+            roll_cmd =  heading * k + 90 * (1-k)  # Roll program
+            if k >= 1:
+                break
+            self.vessel.auto_pilot.target_pitch_and_heading(90, roll_cmd)
         event = self.conn.krpc.add_event(altitude_target_reached)
         with event.condition:
             event.wait()
 
-    def pitch_program(self, end_altitude, pitch_target):
+    def pitch_program(self, end_altitude, pitch_target, heading):
         # Linear pitch program
         print("Pitch program")
         self.vessel.auto_pilot.engage()
-        self.vessel.auto_pilot.target_pitch_and_heading(90, 90)
+        self.vessel.auto_pilot.target_pitch_and_heading(90, heading)
         start_altitude = self.altitude()
         while True:
             altitude = self.altitude()
@@ -264,12 +285,12 @@ class Mission():
             pitch_cmd =  pitch_target * k + 90 * (1-k)  # Pitch program
             if altitude >= end_altitude:
                 break
-            self.vessel.auto_pilot.target_pitch_and_heading(pitch_cmd, 90)
+            self.vessel.auto_pilot.target_pitch_and_heading(pitch_cmd, heading)
         # Gravity turn
         print("Gravity turn")
         self.vessel.control.sas = True
         self.vessel.auto_pilot.disengage()
-        time.sleep(1)
+        time.sleep(.1)
         self.vessel.control.sas_mode = self.conn.space_center.SASMode.prograde
         # Wait for staging
         self.stage_1_thread.join()
@@ -334,7 +355,7 @@ class Mission():
                 C = (MU_EARTH / r0**2 - w0**2 * r0) / a0
                 #
                 fr = A + C
-                dfr = B + ((MU_EARTH / rT**2 - wT**2 * rT) / aT - fr) / T
+                dfr = B + ((MU_EARTH / rT**2 - wT**2 * rT) / aT - C) / T
                 ft = 1 - fr**2 / 2
                 dft = -fr * dfr
                 ddft = -dfr**2 / 2
@@ -352,7 +373,7 @@ class Mission():
             if converged:
                 try:
                     print(f"  CONVERGED | T: {T:5.1f} s | A: {A:+5.3f} | B: {B:+5.3f} | C: {C:+5.3f}"
-                        f" | P0: {degrees(asin(A + C)):+05.1f} deg")
+                          f" | P0: {degrees(asin(A + C)):+05.1f} deg")
                 except ValueError:
                     converged = False
                     continue
@@ -360,7 +381,7 @@ class Mission():
                     self.vessel.auto_pilot.engage()
                     self.vessel.control.sas = False
                     self.steering_thread = SteeringThread(self.conn, self.vessel, self.ut,
-                                                          t0, A, B, C, T)
+                                                          t0, A, B, C, T, args.heading)
                     self.steering_thread.start()
                     initialized = True
                 self.steering_thread.update(t0, A, B, C, T)
@@ -374,12 +395,11 @@ class Mission():
             dt = self.ut() - t0
             T = T - dt
             A = A - B * dt
-            if T < T_PEG_CUTOFF and converged:
+            if (T < args.ref_closed_loop_ttgo and not converged) or T < T_PEG_HARD_CUTOFF:
                 break
         # Completion
         dt = .15
         kP = .01  # rad/s
-        self.steering_thread.update(t0, A + C, 0, 0, 10)
         PeT = pT / (1+eT) - R_EARTH
         ApT = pT / (1-eT) - R_EARTH
         while True:
@@ -388,6 +408,8 @@ class Mission():
             Ap = self.Ap()
             time.sleep(dt)
             t2 = self.ut()
+            if t2-t1 == 0:
+                continue
             nPe = self.Pe()
             nAp = self.Ap()
             dr0 = self.vspeed()
@@ -408,27 +430,27 @@ class Mission():
                 P -= kP * (t2-t1)  # Pitch down if Pe lagging and behind or leading and ahead 
             else:
                 P += kP * (t2-t1)  # Pitch up if Pe lagging and ahead or leading and behind
-            self.steering_thread.update(t2, sin(P), 0, 0, 10)
+            # self.steering_thread.update(t2, sin(P), 0, 0, 10)
             print(f" FINALIZING "
                   f" | ttPe {max(-99.9,min(99.9,ttPe)):5.1f} s "
                   f" | ttAp {max(-99.9,min(99.9,ttAp)):5.1f} s"
                   f" | Pe {self.Pe()-R_EARTH:8.0f} km | Ap {self.Ap()-R_EARTH:8.0f} km"
                   f" | P0: {degrees(P):+05.1f} deg")
-            # dt = self.ut() - t0
-            # T = max(T, dt+1)  # Keep T until h target reached
-            # dr0 = self.vspeed()
-            # r0 = self.altitude() + R_EARTH
-            # w0 = (self.ospeed()**2 - dr0**2)**.5 / r0
-            # h0 = w0 * r0**2
-            # C = (MU_EARTH / r0**2 - w0**2 * r0) / a0
-            # self.steering_thread.update(t0, A, B, C, T)
-            # print(f" FINALIZING | htgo: {(hT-h0)/1e9:5.2f} Gm2/s"
-            #       f" | Pe {self.Pe()-R_EARTH:8.0f} km | Ap {self.Ap()-R_EARTH:8.0f} km")
-            # if h0 >= hT:
-            #     self.steering_thread.update(t0, 0, 0, 0, 0)
-            #     print("Target reached")
-            #     break
-            # time.sleep(.1)
+        # dt = self.ut() - t0
+        # T = max(T, dt+1)  # Keep T until h target reached
+        # dr0 = self.vspeed()
+        # r0 = self.altitude() + R_EARTH
+        # w0 = (self.ospeed()**2 - dr0**2)**.5 / r0
+        # h0 = w0 * r0**2
+        # C = (MU_EARTH / r0**2 - w0**2 * r0) / a0
+        # self.steering_thread.update(t0, A, B, C, T)
+        # print(f" FINALIZING | htgo: {(hT-h0)/1e9:5.2f} Gm2/s"
+        #       f" | Pe {self.Pe()-R_EARTH:8.0f} km | Ap {self.Ap()-R_EARTH:8.0f} km")
+        # if h0 >= hT:
+        #     self.steering_thread.update(t0, 0, 0, 0, 0)
+        #     print("Target reached")
+        #     break
+        time.sleep(.1)
         self.steering_thread.join()
         # self.vessel.control.throttle = 0.0
         self.vessel.auto_pilot.disengage()
@@ -439,8 +461,8 @@ class Mission():
         # First stage
         self.stage_1_thread = StagingThread(self.conn, self.vessel, args, n_stage=1)
         self.stage_1_thread.start()
-        self.vertical_ascent(args.ref_vert_ascent_altitude)
-        self.pitch_program(args.ref_pitch_progr_altitude, args.ref_pitch_progr_end_pitch)
+        self.vertical_ascent(args.ref_vert_ascent_altitude, args.heading)
+        self.pitch_program(args.ref_pitch_progr_altitude, args.ref_pitch_progr_end_pitch, args.heading)
         # Second stage
         self.fairings_thread = FairingThread(self.conn, self.vessel, args, self.altitude, self.q)
         self.fairings_thread.start()
@@ -463,12 +485,13 @@ if __name__ == '__main__':
     parser.add_argument('-udt', '--ullage_times', type=float, nargs=2)
     parser.add_argument('-edt', '--endstage_times', type=float, nargs=2)
     parser.add_argument('-hva', '--ref_vert_ascent_altitude', default=1000, type=float)
+    parser.add_argument('-hdg', '--heading', default=90, type=float)
     parser.add_argument('-hpp', '--ref_pitch_progr_altitude', default=7000, type=float)
     parser.add_argument('-ppp', '--ref_pitch_progr_end_pitch', default=70, type=float)
     parser.add_argument('-htg', '--tgt_closed_loop_altitude', default=155000, type=float)
     parser.add_argument('-ntg', '--tgt_closed_loop_true_anomaly', default=0, type=float)
     parser.add_argument('-etg', '--tgt_closed_loop_eccentricity', default=0, type=float)
-    parser.add_argument('-tgo', '--ref_closed_loop_ttgo', default=30, type=float)
+    parser.add_argument('-tgo', '--ref_closed_loop_ttgo', default=25, type=float)
     parser.add_argument('-fag', '--fairings_action_group', default=None, type=int)
     parser.add_argument('-fmh', '--fairings_minimum_altitude', default=50000, type=float)
     parser.add_argument('-fmq', '--fairings_dynamic_pressure', default=100, type=float)
