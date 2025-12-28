@@ -1,5 +1,7 @@
 .vscode/
 literature/
 old/
+new/__pycache__
 tm_logs/
 telemetry*
+__pycache__
