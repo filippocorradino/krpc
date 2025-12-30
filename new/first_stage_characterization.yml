@@ -11,42 +11,35 @@ vessel:
   # - stage (spacebar) for 'cutoff_events' times, at 1 s delay each
   # - wait for 'post_coasting' seconds
   # Order from lower to upper stages
+  # >>> MAKE IT SO THAT SIMULATION STOPS AT FIRST STAGE BURNOUT
   stages:
   - name: ''  # optional
     pre_coasting: 0.  # s
-    start_events: 1
-    ullage_time: 5.  # s
-    post_ignition_events: 0
-    thrust_threshold: 100000.  # N
-    cutoff_events: 1
+    start_events: 0
+    ullage_time: 0.  # s
+    post_ignition_events: 1
+    thrust_threshold: 550000.  # N
+    cutoff_events: 0
     post_coasting: 0.  # s
   # Whenever the vehicle is BOTH above the minimum altitude and below the maximum
   # dynamic pressure specified, the fairings will be released through the specified
   # action group
-  fairings:
-    action_group: 9
-    min_altitude: 50000.  # m
-    max_dynamic_pressure: 100.  # Pa
+  # >>> INHIBIT FAIRINGS FOR THIS FLIGHT
+  # fairings:
+  #   action_group: 9  # Incorrect group to inhibit deployment
+  #   min_altitude: 50000.  # m
+  #   max_dynamic_pressure: 100.  # Pa
+# >>> GENERIC ASCENT PROFILE
 guidance:
   launch_azimuth: 90.  # degrees
   vertical_ascent:
     altitude: 1000.  # m
   pitch_program:
-    altitude: 7000.  # m
+    altitude: 9000.  # m
     pitch: 70.  # degrees
-  closed_loop:
-    # TODO: document constraints
-    type: PEG  # PEG or UPFG - PEG allows fewer constraints (for now only a, e)
-    a: 6526000.  # m
-    e: 0.  # degrees
-    i: null  # degrees
-    O: null  # hours
-    w: null  # degrees
-    target: [null, null, null]  # ECI versor
-    tgo_cutoff: 25.  # s
 # Establish streams of attributes for the active vessel to be logged if required
 log_data:
-  sample_time: 2  # s
+  sample_time: 1  # s
   vessel:  # Vessel
     m: mass
     T: thrust

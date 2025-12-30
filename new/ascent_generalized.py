@@ -403,8 +403,12 @@ class Mission():
         if log:
             self.start_logging()
         self.steering_thread = None
-        self.fairings_thread = FairingThread(self.conn, self.vessel,
-                                             self.configs['vessel']['fairings'])
+        self.fairings_thread = None
+        try:
+            self.fairings_thread = FairingThread(self.conn, self.vessel,
+                                                self.configs['vessel']['fairings'])
+        except KeyError:
+            pass
         # First stage
         self.stage_thread = StagingThread(self.conn, self.vessel, self.ut,
                                           self.configs['vessel']['stages'][0], n_stage=1)
@@ -412,7 +416,8 @@ class Mission():
         azimuth = self.configs['guidance']['launch_azimuth']
         self.vertical_ascent(self.configs['guidance']['vertical_ascent']['altitude'],
                              azimuth)
-        self.fairings_thread.start()
+        if self.fairings_thread:
+            self.fairings_thread.start()
         self.pitch_program(self.configs['guidance']['pitch_program']['altitude'],
                            self.configs['guidance']['pitch_program']['pitch'],
                            azimuth)
@@ -429,9 +434,10 @@ class Mission():
             self.terminal_guidance(self.configs['guidance']['closed_loop'])
             self.stage_thread.join()
         # Cleanup
-        if not self.fairings_thread.stopped:
-            self.fairings_thread.stop()
-        self.fairings_thread.join()
+        if self.fairings_thread:
+            if not self.fairings_thread.stopped:
+                self.fairings_thread.stop()
+            self.fairings_thread.join()
         if self.logging_thread:
             self.logging_thread.stop()
             self.logging_thread.join()
