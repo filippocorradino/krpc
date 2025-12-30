@@ -1,3 +1,4 @@
 # Move to poetry eventually
+pyyaml
 krpc
 numpy

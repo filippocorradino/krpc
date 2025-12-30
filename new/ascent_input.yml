@@ -1,0 +1,75 @@
+    # parser.add_argument('--address', default='127.0.0.1', type=str)
+  
+    # parser.add_argument('-hva', '--ref_vert_ascent_altitude', default=1000, type=float)
+    # parser.add_argument('-hdg', '--heading', default=90, type=float)
+    # parser.add_argument('-hpp', '--ref_pitch_progr_altitude', default=7000, type=float)
+    # parser.add_argument('-ppp', '--ref_pitch_progr_end_pitch', default=70, type=float)
+    # parser.add_argument('-htg', '--tgt_closed_loop_altitude', default=155000, type=float)
+    # parser.add_argument('-ntg', '--tgt_closed_loop_true_anomaly', default=0, type=float)
+    # parser.add_argument('-etg', '--tgt_closed_loop_eccentricity', default=0, type=float)
+    # parser.add_argument('-tgo', '--ref_closed_loop_ttgo', default=25, type=float)
+    # parser.add_argument('-l', '--log_data', action='store_true')
+    # parser.add_argument('--log_sample_time', default=2)
+vessel:
+  # For each vehicle stage, the Sequencer will perform the following:
+  # - wait for 'pre_coasting' seconds
+  # - stage (spacebar) for 'start_events' times, at 1 s delay each
+  # - sleep 'ullage_time' seconds to allow for ullage burn (triggered in start events)
+  # - set max throttle
+  # - stage (spacebar) ONCE for ignition
+  # - wait to VERIFY ignition (thrust > thrust_threshold)
+  # - stage (spacebar) for 'post_ignition_events' times, at 1 s delay each
+  # - wait to DETECT cutoff (thrust < thrust_threshold)
+  # - stage (spacebar) for 'cutoff_events' times, at 1 s delay each
+  # - wait for 'post_coasting' seconds
+  # Order from lower to upper stages
+  stages:
+  - name: ''  # optional
+    pre_coasting: 0.  # s
+    start_events: 1
+    ullage_time: 5.  # s
+    post_ignition_events: 0
+    thrust_threshold: 100000.  # N
+    cutoff_events: 1
+    post_coasting: 0.  # s
+  # Whenever the vehicle is BOTH above the minimum altitude and below the maximum
+  # dynamic pressure specified, the fairings will be released through the specified
+  # action group
+  fairings:
+    action_group: 9
+    min_altitude: 50000.  # m
+    max_dynamic_pressure: 100.  # Pa
+guidance:
+  launch_azimuth: 90.  # degrees
+  vertical_ascent:
+    altitude: 1000.  # m
+  pitch_program:
+    altitude: 7000.  # m
+    pitch: 70.  # degrees
+  closed_loop:
+    # TODO: document constraints
+    type: PEG  # PEG or UPFG - PEG allows fewer constraints (for now only a, e)
+    a: 6526000.  # m
+    e: 0.  # degrees
+    i: null  # degrees
+    O: null  # hours
+    w: null  # degrees
+    target: [null, null, null]  # ECI versor
+    tgo_cutoff: 25.  # s
+# Establish streams of attributes for the active vessel to be logged if required
+log_data:
+  sample_time: 2  # s
+  vessel:  # Vessel
+    m: mass
+    T: thrust
+    Isp: specific_impulse
+  orbit:  # Vessel.orbit
+    vo: speed
+  flight:  # Vessel.flight(vessel.orbit.body.reference_frame)
+    h: mean_altitude
+    p: static_pressure
+    q: dynamic_pressure
+    va: speed
+    Ma: mach
+    CD: drag_coefficient
+    D: drag

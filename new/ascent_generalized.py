@@ -2,22 +2,20 @@ import argparse
 import csv
 import threading
 import time
+import os
 import signal
-from math import sqrt, sin, asin, cos, degrees, radians
+from math import sqrt, asin, degrees
 
 from krpc.error import StreamError
 import krpc
+import yaml
 
-from guidance import peg
+from constants import *
+from tuple_math import norm, dot, cross
+import guidance
 
-
-# Physical constants
-G0 = 9.80665
-R_EARTH = 6371000
-MU_EARTH = 398600000000000
 
 # Guidance settings
-T_PEG_HARD_CUTOFF = 10  # TODO: bring in guidance
 T_GUIDANCE_MARGIN = 5  # How many seconds past tgo to wait for termination before shutdown
 
 # Settings for complementary filter estimating T, Isp
@@ -26,28 +24,31 @@ ENGINE_FILTER_MIN_T = 2
 ENGINE_FILTER_MIN_N = 10
 
 
-def dot(a, b):
-    return sum(x*y for x, y in zip(a, b))
-
-def cross(a, b):
-    return (a[1]*b[2] - a[2]*b[1],
-            a[2]*b[0] - a[0]*b[2],
-            a[0]*b[1] - a[1]*b[0])
-
-
 class LoggingThread(threading.Thread):
 
-    def __init__(self, conn, vessel, log_sample_time, tm_dict):
+    def __init__(self, conn, vessel, tm_dict):
         super().__init__()
-        self.log_sample_time = log_sample_time
+        self.log_sample_time = tm_dict['sample_time']
         self.tm_dict = {}
         rf = vessel.orbit.body.reference_frame
-        for k, v in tm_dict['vessel']:
-            self.tm_dict[k] = conn.add_stream(getattr, vessel, v)
-        for k, v in tm_dict['orbit']:
-            self.tm_dict[k] = conn.add_stream(getattr, vessel.orbit, v)
-        for k, v in tm_dict['flight']:
-            self.tm_dict[k] = conn.add_stream(getattr, vessel.flight(rf), v)
+        # Function to pack vector TM streams into a single value
+        def tm_reader(stream):
+            def inner():
+                value = stream()
+                try:
+                    if len(value) > 1:
+                        return norm(value)
+                except TypeError:
+                    pass
+                return value
+            return inner
+        # Gather all TM streams
+        for k, v in tm_dict['vessel'].items():
+            self.tm_dict[k] = tm_reader(conn.add_stream(getattr, vessel, v))
+        for k, v in tm_dict['orbit'].items():
+            self.tm_dict[k] = tm_reader(conn.add_stream(getattr, vessel.orbit, v))
+        for k, v in tm_dict['flight'].items():
+            self.tm_dict[k] = tm_reader(conn.add_stream(getattr, vessel.flight(rf), v))
         self.stopped = False
 
     def run(self):
@@ -58,8 +59,8 @@ class LoggingThread(threading.Thread):
             while not self.stopped:
                 tm_row = [v() for _, v in self.tm_dict.items()]
                 writer.writerow(tm_row)
-                print(f", ".join(f'{k}: {v:12.6f}'
-                                 for k, v in zip(self.tm_dict.keys(), tm_row)))
+                print(f"|".join(f"{k:>14s}" for k in self.tm_dict.keys()))
+                print(f"|".join(f"{v: 14.6f}" for v in tm_row))
                 time.sleep(self.log_sample_time)
 
     def stop(self):
@@ -99,13 +100,13 @@ class SteeringThread(threading.Thread):
 
 class FairingThread(threading.Thread):
     
-    def __init__(self, conn, vessel, args):
+    def __init__(self, conn, vessel, configs):
         super().__init__()
         self.conn = conn
         self.vessel = vessel
-        self.fairings_action_group = args.fairings_action_group
-        self.fairings_dynamic_pressure = args.fairings_dynamic_pressure
-        self.fairings_minimum_altitude = args.fairings_minimum_altitude
+        self.fairings_action_group = configs['action_group']
+        self.fairings_dynamic_pressure = configs['max_dynamic_pressure']
+        self.fairings_minimum_altitude = configs['min_altitude']
         self.h = self.conn.add_stream(getattr, self.vessel.flight(), 'mean_altitude')
         self.q = self.conn.add_stream(getattr, self.vessel.flight(), 'dynamic_pressure')
         self.stopped = False
@@ -126,32 +127,25 @@ class FairingThread(threading.Thread):
             time.sleep(1)
         print(f"Fairing Jett")
         self.vessel.control.set_action_group(self.fairings_action_group, True)
+        self.stopped = True
     
     def stop(self):
-        print("Stopped Fairing")
+        print("Fairing Sequencer Override")
         self.stopped = True
 
 
 class StagingThread(threading.Thread):
     
-    def __init__(self, conn, vessel, args, n_stage, name=''):
-        ix_stage = n_stage-1
+    def __init__(self, conn, vessel, ut_stream, config, n_stage):
         super().__init__()
         self.conn = conn
         self.vessel = vessel
-        self.thrust_threshold = args.thrust_thresholds[ix_stage]
-        self.stage_s_events = args.stage_s_events[ix_stage]
-        self.stage_i_events = args.stage_i_events[ix_stage]
-        self.stage_e_events = args.stage_e_events[ix_stage]
-        self.ullage = args.ullage_times[ix_stage]
-        try:
-            self.endstage = args.endstage_times[ix_stage]
-        except TypeError:
-            self.endstage = 0  # endstage wasn't defined
+        self.ut = ut_stream
+        self.config = config
         self.ignited = False
-        if not name:
-            name = f'Stage {n_stage}'
-        self.name = name
+        self.name = config['name']
+        if not self.name:
+            self.name = f'Stage {n_stage}'
         self.stopped = False
     
     def stage(self, n=1, sleep=1):
@@ -163,14 +157,20 @@ class StagingThread(threading.Thread):
         thrust = self.conn.get_call(getattr, self.vessel, 'thrust')
         ignition = self.conn.krpc.Expression.greater_than(
             self.conn.krpc.Expression.call(thrust),
-            self.conn.krpc.Expression.constant_float(self.thrust_threshold))
-        burnout = self.conn.krpc.Expression.less_than(
+            self.conn.krpc.Expression.constant_float(self.config['thrust_threshold']))
+        cutoff = self.conn.krpc.Expression.less_than(
             self.conn.krpc.Expression.call(thrust),
-            self.conn.krpc.Expression.constant_float(self.thrust_threshold))
+            self.conn.krpc.Expression.constant_float(self.config['thrust_threshold']))
+        # Pre-coasting
+        coast = self.config['pre_coasting']
+        if coast:
+            print(f"Coasting {coast} s")
+            ut0 = self.ut()
+            while self.ut() - ut0 < coast:
+                time.sleep(1)
         # Stage Start events
-        self.stage(n=self.stage_s_events)
-        if self.ullage:
-            time.sleep(self.ullage)
+        self.stage(n=self.config['start_events'])
+        time.sleep(self.config['ullage_time'])
         # Stage Ignition events
         self.vessel.control.throttle = 1.0
         self.stage()  # Engine on
@@ -179,42 +179,46 @@ class StagingThread(threading.Thread):
             event.wait()
             print(f"{self.name} Ignition")
         self.ignited = True
-        self.stage(n=self.stage_i_events)
+        self.stage(n=self.config['post_ignition_events'])
         # Stage End events
-        event = self.conn.krpc.add_event(burnout)
+        event = self.conn.krpc.add_event(cutoff)
         with event.condition:
             event.wait()
-            print(f"{self.name} Burnout")
+            print(f"{self.name} Cutoff")
         self.ignited = False
         time.sleep(1)
-        self.stage(n=self.stage_e_events)
-        if self.endstage:
-            print(f"Coasting {self.endstage} s")
-            ut = self.conn.add_stream(getattr, self.conn.space_center, 'ut')
-            ut0 = ut()
-            while ut() - ut0 < self.endstage:
+        self.stage(n=self.config['cutoff_events'])
+        # Post-coasting
+        coast = self.config['post_coasting']
+        if coast:
+            print(f"Coasting {coast} s")
+            ut0 = self.ut()
+            while self.ut() - ut0 < coast:
                 time.sleep(1)
     
     def stop(self):
-        print("Stopped Stage Sequencer")
+        print(f"Stopped {self.name} Sequencer")
         self.stopped = True
 
 
 class Mission():
 
-    def __init__(self, conn):
+    def __init__(self, conn, config_file):
         self.conn = conn
         self.vessel = conn.space_center.active_vessel
         self.ut = self.conn.add_stream(getattr, self.conn.space_center, 'ut')
         self.logging_thread = None
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), config_file), 'r') as fp:
+            self.configs = yaml.safe_load(fp)
         self.stopped = False
-
-    def start_logging(self, log_sample_time, tm_dict):
-        self.logging_thread = LoggingThread(self.conn, self.vessel, log_sample_time, tm_dict)
+        
+    def start_logging(self):
+        self.logging_thread = LoggingThread(self.conn, self.vessel, self.configs['log_data'])
         self.logging_thread.start()
         print("Logging started")
     
     def get_isp(self):
+        # Needed because it seems that the standard method returns 0
         active_engines = [e for e in self.vessel.parts.engines
                           if e.active and e.has_fuel]
         thrust = sum(engine.thrust for engine in active_engines)
@@ -304,10 +308,8 @@ class Mission():
         self.vessel.auto_pilot.disengage()
         time.sleep(.1)
         self.vessel.control.sas_mode = self.conn.space_center.SASMode.prograde
-        # Wait for staging
-        self.stage_thread.join()
         
-    def closed_loop_ascent(self, args):
+    def closed_loop_ascent(self, configs, heading):
         # Injection into orbit
         print('Closed loop guidance')
         # Streams
@@ -315,14 +317,9 @@ class Mission():
         mass_stream = self.conn.add_stream(getattr, self.vessel, 'mass')
         r_vec_stream = self.conn.add_stream(self.vessel.position, self.vessel.orbit.body.non_rotating_reference_frame)
         v_vec_stream = self.conn.add_stream(self.vessel.velocity, self.vessel.orbit.body.non_rotating_reference_frame)
-        # TODO: COMPUTE CONSTRAINTS
-        nT = radians(args.tgt_closed_loop_true_anomaly)
-        eT = args.tgt_closed_loop_eccentricity
-        rT = args.tgt_closed_loop_altitude + R_EARTH
-        pT = rT * (1 + eT*cos(nT))
-        drT = (MU_EARTH / pT)**.5 * eT * sin(nT)
-        hT = (MU_EARTH * pT)**.5
-        # Engine parameters filter
+        # Guidance init
+        guid: guidance.Guidance = getattr(guidance, configs['type'])(self.vessel, configs, heading, MU_EARTH)
+        # Engine parameters filter init
         thrust = thrust_stream()
         Isp = self.get_isp()  # FIXME with streams (why standard stream gets Isp=0?)
         initialized = False
@@ -331,6 +328,7 @@ class Mission():
         print(f"Average Thrust {thrust/1000:5.1f} kN - Average Isp {Isp:.0f} s")
         # Closed Loop
         while True:
+            # Engine parameters filter
             Isp = Isp*ENGINE_FILTER_ALPHA + (1-ENGINE_FILTER_ALPHA)*self.get_isp()
             thrust = thrust*ENGINE_FILTER_ALPHA + (1-ENGINE_FILTER_ALPHA)*thrust_stream()
             if n_filter < ENGINE_FILTER_MIN_N:
@@ -339,47 +337,35 @@ class Mission():
                 continue
             ve = Isp * G0
             tau = ve * mass_stream() / thrust
-            if not initialized:
-                T = 0.995 * tau
+            # State vector
             t0 = self.ut()
             r0_vec = r_vec_stream()
             v0_vec = v_vec_stream()
-            A, B, C0, CT, T, converged = peg(r0_vec, v0_vec, hT, rT, drT, ve, tau, MU_EARTH, T)
-            if converged:
+            # Guidance call
+            res: guidance.Guidance.GuidanceResult = guid(r0_vec, v0_vec, ve, tau)
+            if guid.converged:
                 try:
-                    print(f"  CONVERGED | T: {T:5.1f} s | A: {A:+5.3f} | B: {B:+5.3f} | C: {C0:+5.3f}"
-                          f" | P0: {degrees(asin(A + C0)):+05.1f} deg")
+                    print(f"  CONVERGED | T: {res.tgo:5.1f} s | P0: {degrees(asin(res.dir[0])):+05.1f} deg")
                 except ValueError:
-                    converged = False
                     continue
                 if not initialized:
                     self.vessel.auto_pilot.engage()
                     self.vessel.control.sas = False
-                    self.steering_thread = SteeringThread(self.vessel, self.ut, self.vessel.surface_reference_frame)
-                pitch_0 = asin(A+C0)
-                pitch_T = asin(A+CT+B*T)
-                hdg = radians(args.heading)
-                dir_0 = (sin(pitch_0), cos(pitch_0)*cos(hdg), cos(pitch_0)*sin(hdg))
-                dir_T = (sin(pitch_T), cos(pitch_T)*cos(hdg), cos(pitch_T)*sin(hdg))
-                ddir = tuple((dt - d0) / T for d0, dt in zip(dir_0, dir_T))
-                self.steering_thread.update(t0, dir_0, ddir, T)
+                    self.steering_thread = SteeringThread(self.vessel, self.ut, guid.output_reference_frame)
+                self.steering_thread.update(t0, res.dir, res.ddir, res.tgo)
                 if not initialized:
                     self.steering_thread.start()
                     initialized = True
             else:
                 try:
-                    print(f"UNCONVERGED | T: {T:5.1f} s | A: {A:+5.3f} | B: {B:+5.3f} | C: {C0:+5.3f}"
-                          f" | P0: {degrees(asin(A + C0)):+05.1f} deg")
+                    print(f"UNCONVERGED | T: {res.tgo:5.1f} s | P0: {degrees(asin(res.dir[0])):+05.1f} deg")
                 except ValueError:
                     pass
             time.sleep(1)
-            dt = self.ut() - t0
-            T = T - dt
-            A = A - B * dt
-            if (T < args.ref_closed_loop_ttgo and not converged) or T < T_PEG_HARD_CUTOFF:
+            if guid.cutoff:
                 break
     
-    def terminal_guidance(self):
+    def terminal_guidance(self, configs):
         # TODO: active guidance rather than just cutoff?
         r_vec_stream = self.conn.add_stream(self.vessel.position, self.vessel.orbit.body.non_rotating_reference_frame)
         v_vec_stream = self.conn.add_stream(self.vessel.velocity, self.vessel.orbit.body.non_rotating_reference_frame)
@@ -387,11 +373,7 @@ class Mission():
         Ap_stream = self.conn.add_stream(getattr, self.vessel.orbit, 'apoapsis')
         # Completion
         dt = .15
-        # TODO: COMPUTE CONSTRAINTS
-        nT = radians(args.tgt_closed_loop_true_anomaly)
-        eT = args.tgt_closed_loop_eccentricity
-        rT = args.tgt_closed_loop_altitude + R_EARTH
-        pT = rT * (1 + eT*cos(nT))
+        pT = configs['sma'] * (1 - configs['e']**2)
         hT = (MU_EARTH * pT)**.5
         reached = False
         while True:
@@ -414,60 +396,62 @@ class Mission():
         self.steering_thread.stop()
         self.steering_thread.join()
         self.vessel.auto_pilot.disengage()
-        print("Orbital insertion complete!")
+        print("Orbital insertion complete")
 
-    def execute(self, args):
-        if args.log_data:
-            self.start_logging(args.log_sample_time, {})
+    def execute(self, log=False):
+        # TODO: Support arbitrary number of stages (move per-stage guidance in configs?)
+        if log:
+            self.start_logging()
         self.steering_thread = None
-        self.fairings_thread = FairingThread(self.conn, self.vessel, args)
+        self.fairings_thread = FairingThread(self.conn, self.vessel,
+                                             self.configs['vessel']['fairings'])
         # First stage
-        self.stage_thread = StagingThread(self.conn, self.vessel, args, n_stage=1)
+        self.stage_thread = StagingThread(self.conn, self.vessel, self.ut,
+                                          self.configs['vessel']['stages'][0], n_stage=1)
         self.stage_thread.start()
-        self.vertical_ascent(args.ref_vert_ascent_altitude, args.heading)
+        azimuth = self.configs['guidance']['launch_azimuth']
+        self.vertical_ascent(self.configs['guidance']['vertical_ascent']['altitude'],
+                             azimuth)
         self.fairings_thread.start()
-        self.pitch_program(args.ref_pitch_progr_altitude, args.ref_pitch_progr_end_pitch, args.heading)
+        self.pitch_program(self.configs['guidance']['pitch_program']['altitude'],
+                           self.configs['guidance']['pitch_program']['pitch'],
+                           azimuth)
+        self.stage_thread.join()
         # Second stage
-        self.stage_thread = StagingThread(self.conn, self.vessel, args, n_stage=2)
-        self.stage_thread.start()
-        while not self.stage_thread.ignited:
+        if len(self.configs['vessel']['stages']) > 1:
+            self.stage_thread = StagingThread(self.conn, self.vessel, self.ut,
+                                              self.configs['vessel']['stages'][1], n_stage=2)
+            self.stage_thread.start()
+            while not self.stage_thread.ignited:
+                time.sleep(1)
             time.sleep(1)
-        time.sleep(1)
-        self.closed_loop_ascent(args)
-        self.terminal_guidance()
+            self.closed_loop_ascent(self.configs['guidance']['closed_loop'], azimuth)
+            self.terminal_guidance(self.configs['guidance']['closed_loop'])
+            self.stage_thread.join()
+        # Cleanup
+        if not self.fairings_thread.stopped:
+            self.fairings_thread.stop()
+        self.fairings_thread.join()
+        if self.logging_thread:
+            self.logging_thread.stop()
+            self.logging_thread.join()
+        print("Ascent program completed")
 
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
+
+    parser.add_argument('config', type=str)
     parser.add_argument('--address', default='127.0.0.1', type=str)
-    parser.add_argument('-tth', '--thrust_thresholds', type=float, nargs=2)
-    parser.add_argument('-sse', '--stage_s_events', type=int, nargs=2)
-    parser.add_argument('-sie', '--stage_i_events', type=int, nargs=2)
-    parser.add_argument('-see', '--stage_e_events', type=int, nargs=2)
-    parser.add_argument('-udt', '--ullage_times', type=float, nargs=2)
-    parser.add_argument('-edt', '--endstage_times', type=float, nargs=2)
-    parser.add_argument('-hva', '--ref_vert_ascent_altitude', default=1000, type=float)
-    parser.add_argument('-hdg', '--heading', default=90, type=float)
-    parser.add_argument('-hpp', '--ref_pitch_progr_altitude', default=7000, type=float)
-    parser.add_argument('-ppp', '--ref_pitch_progr_end_pitch', default=70, type=float)
-    parser.add_argument('-htg', '--tgt_closed_loop_altitude', default=155000, type=float)
-    parser.add_argument('-ntg', '--tgt_closed_loop_true_anomaly', default=0, type=float)
-    parser.add_argument('-etg', '--tgt_closed_loop_eccentricity', default=0, type=float)
-    parser.add_argument('-tgo', '--ref_closed_loop_ttgo', default=25, type=float)
-    parser.add_argument('-fag', '--fairings_action_group', default=None, type=int)
-    parser.add_argument('-fmh', '--fairings_minimum_altitude', default=50000, type=float)
-    parser.add_argument('-fmq', '--fairings_dynamic_pressure', default=100, type=float)
-    parser.add_argument('-sff', '--final_staging', action='store_true')
     parser.add_argument('-l', '--log_data', action='store_true')
-    parser.add_argument('--log_sample_time', default=2)
 
     args = parser.parse_args()
 
     conn = krpc.connect(name='Ascent', address=args.address)
     print("Connected")
 
-    mission = Mission(conn)
+    mission = Mission(conn, args.config)
     signal.signal(signal.SIGINT, mission.terminate)
 
-    mission.execute(args)
+    mission.execute(args.log_data)
