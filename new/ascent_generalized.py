@@ -2,9 +2,9 @@ import argparse
 import csv
 import threading
 import time
-import os
 import signal
 from math import sqrt, asin, degrees
+from pathlib import Path
 
 from krpc.error import StreamError
 import krpc
@@ -208,7 +208,7 @@ class Mission():
         self.vessel = conn.space_center.active_vessel
         self.ut = self.conn.add_stream(getattr, self.conn.space_center, 'ut')
         self.logging_thread = None
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), config_file), 'r') as fp:
+        with open(Path(__file__).parent / config_file, 'r') as fp:
             self.configs = yaml.safe_load(fp)
         self.stopped = False
         
