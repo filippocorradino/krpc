@@ -1,59 +1,113 @@
 from abc import ABC, abstractmethod
 from collections import namedtuple
-from math import sqrt, sin, asin, cos, acos, log, exp, radians
+from math import sqrt, sin, asin, cos, acos, atan2, log, exp, radians, pi, inf
 
-import numpy as np  # Evaluate if we really need it
+import numpy as np  # Eventually remove numpy dependency?
 
 from constants import *
 
-
-T_PEG_HARD_CUTOFF = 10
-
-
-def rv2coe(r, v, mu):
-    h = np.cross(r, v)
-    n = np.cross(np.array([0, 0, 1]), h)
-    r_mag = np.linalg.norm(r)
-    v_mag = np.linalg.norm(v)
-    h_mag = np.linalg.norm(h)
-    n_mag = np.linalg.norm(n)
-    # Eccentricity
-    evec = ((v_mag**2 - mu/r_mag)*r - np.dot(r, v)*v) / mu
-    e = np.linalg.norm(evec)
-    # Semi-major axis
-    energy = (v_mag**2)/2 - mu/r_mag
-    if abs(e - 1) > 0:
-        a = -mu / (2*energy)
-    else:
-        a = np.inf  # TODO: hyperbolic
-    # Inclination
-    i = acos(h[-1] / h_mag)
-    # Right ascension of the ascending node
-    Omega = acos(n[0] / n_mag)
-    if n[1] < 0:
-        Omega = 2*np.pi - Omega
-    # Argument of periapsis
-    omega = acos(np.dot(evec, n) / (e*n_mag))
-    if evec[-1] < 0:
-        omega = 2*np.pi - omega
-    # True anomaly
-    nu = acos(np.dot(evec, r) / (e*r_mag))
-    if np.dot(r, v) < 0:
-        nu = 2*np.pi - nu
-    return a, e, i, Omega, omega, nu
+# TODO: uniform across library either v/v_mag or v_vec/v
 
 
-def rv2ae(r, v, mu):
-    r_mag = np.linalg.norm(r)
-    v_mag = np.linalg.norm(v)
-    evec = ((v_mag**2 - mu/r_mag)*r - np.dot(r, v)*v) / mu
-    e = np.linalg.norm(evec)
-    energy = (v_mag**2)/2 - mu/r_mag
-    if abs(e - 1) > 0:
-        a = -mu / (2*energy)
-    else:
-        a = np.inf  # TODO: hyperbolic
-    return a, e
+
+class Orbit():
+
+    def __init__(self, a, e, i, O, w, nu0, t0=0, mu=MU_EARTH):
+        self.a = a
+        self.e = e
+        self.i = i
+        self.O = O
+        self.w = w
+        self.nu0 = nu0
+        E0 = atan2(sqrt(1-e**2)*sin(nu0), e + cos(nu0))
+        self.M0 = E0 - e*sin(E0)
+        self.t0 = t0
+        self.mu = mu
+        self.n = sqrt(mu / a**3)
+
+    @classmethod
+    def from_rv(cls, r_vec, v_vec, t0=0, mu=MU_EARTH):
+        a, e, i, O, w, nu0 = cls.rv2coe(r_vec, v_vec, mu)
+        return cls(a, e, i, O, w, nu0, t0, mu)
+
+    def propagate(self, t, tol=1e-12, maxiter=1e2):
+        # Calculate mean anomaly
+        M = self.M0 + (t - self.t0)*self.n
+        M = M % (2*pi)
+        # Calculate eccentric anomaly
+        # 3rd order iterative method from Murison 2006
+        s = sin(M)
+        c = cos(M)
+        e = self.e
+        E = M + e*s + (e**2)*s*c + 0.5*(e**3)*s*(3*(c**2)-1)
+        for _ in range(maxiter):
+            x1 = cos(E)
+            x2 = x1*e - 1
+            x3 = sin(E)
+            x4 = x3*e
+            x5 = x4 + M - E
+            x6 = x5 / (x5*x4/x2/2 + x2)
+            dE = x5 / ((x3/2 - x1*x6/6)*x6*e + x2)
+            E -= dE
+            if abs (dE) < tol:
+                E = E % (2*pi)
+                # Calculate true anomaly
+                nu = acos((e - cos(E))/(e*cos(E) - 1))
+                if E > pi:
+                    nu = 2*pi - nu
+                nu = nu % (2*pi)
+                return nu
+        raise RuntimeError(" Kepler solver failed to converge")
+
+    @staticmethod
+    def rv2coe(r_vec, v_vec, mu):
+        r_vec = np.array(r_vec)
+        v_vec = np.array(v_vec)
+        h_vec = np.cross(r_vec, v_vec)
+        n_vec = np.cross(np.array((0, 0, 1)), h_vec)
+        r = np.linalg.norm(r_vec)
+        v = np.linalg.norm(v_vec)
+        h = np.linalg.norm(h_vec)
+        n = np.linalg.norm(n_vec)
+        # Eccentricity
+        e_vec = ((v**2 - mu/r)*r_vec - np.dot(r_vec, v_vec)*v_vec) / mu  # NP
+        e = np.linalg.norm(e_vec)
+        # Semi-major axis
+        energy = (v**2)/2 - mu/r
+        if abs(e - 1) > 0:
+            a = -mu / (2*energy)
+        else:
+            a = inf  # TODO: hyperbolic
+        # Inclination
+        i = acos(h_vec[-1] / h)
+        # Right ascension of the ascending node
+        O = acos(n_vec[0] / n)
+        if n_vec[1] < 0:
+            O = 2*pi - O
+        # Argument of periapsis
+        w = acos(np.dot(e_vec, n_vec) / (e*n))
+        if e_vec[-1] < 0:
+            w = 2*pi - w
+        # True anomaly
+        nu = acos(np.dot(e_vec, r_vec) / (e*r))
+        if np.dot(r_vec, v_vec) < 0:
+            nu = 2*pi - nu
+        return a, e, i, O, w, nu
+
+    @staticmethod
+    def rv2ae(r_vec, v_vec, mu):
+        r_vec = np.array(r_vec)
+        v_vec = np.array(v_vec)
+        r = np.linalg.norm(r_vec)
+        v = np.linalg.norm(v_vec)
+        e_vec = ((v**2 - mu/r)*r_vec - np.dot(r_vec, v_vec)*v_vec) / mu  # NP
+        e = np.linalg.norm(e_vec)
+        energy = (v**2)/2 - mu/r
+        if abs(e - 1) > 0:
+            a = -mu / (2*energy)
+        else:
+            a = inf  # TODO: hyperbolic
+        return a, e
 
 
 class Guidance(ABC):
@@ -85,6 +139,8 @@ class Guidance(ABC):
 
 class PEG(Guidance):
 
+    T_HARD_CUTOFF = 10
+
     def __init__(self, vessel, configs, mu):
         self.mu = mu
         nT = 0
@@ -96,8 +152,8 @@ class PEG(Guidance):
         self.wT = self.hT / self.rT**2
         self.hdg = vessel.flight.heading
         self.output_reference_frame = vessel.surface_reference_frame
-        self.T = +np.inf
-        self.T_cutoff = max(T_PEG_HARD_CUTOFF, configs['tgo_cutoff'])
+        self.T = +inf
+        self.T_cutoff = max(self.T_HARD_CUTOFF, configs['tgo_cutoff'])
         self.converged = False
     
     @property
@@ -163,11 +219,13 @@ class PEG(Guidance):
 
 class UPFG(Guidance):
 
+    T_HARD_CUTOFF = 5
+
     def __init__(self, vessel, configs, mu):
         self.mu = mu
         self.constraints = self.parse_constraints(configs)
         self.output_reference_frame = vessel.orbit.body.non_rotating_reference_frame
-        self.tgo_cutoff = max(T_PEG_HARD_CUTOFF, configs['tgo_cutoff'])
+        self.tgo_cutoff = max(self.T_HARD_CUTOFF, configs['tgo_cutoff'])
         self.converged = False
     
     @property
