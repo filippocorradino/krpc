@@ -276,10 +276,10 @@ class Mission():
             print("Tower cleared")
         # Linear roll program
         print("Roll program")
+        prog = guidance.RollProgram(start_altitude, end_altitude, heading)
         while True:
-            k = ((altitude_stream()-start_altitude) / (end_altitude-start_altitude))**.5 * 1.1
-            roll_cmd =  heading * k + 90 * (1-k)  # Roll program
-            if k >= 1:
+            roll_cmd, complete = prog(altitude_stream())
+            if complete:
                 break
             self.vessel.auto_pilot.target_pitch_and_heading(90, roll_cmd)
             time.sleep(.02)
@@ -294,11 +294,10 @@ class Mission():
         self.vessel.auto_pilot.engage()
         self.vessel.auto_pilot.target_pitch_and_heading(90, heading)
         start_altitude = altitude_stream()
+        prog = guidance.PitchProgram(start_altitude, end_altitude, pitch_target)
         while True:
-            altitude = altitude_stream()
-            k = ((altitude-start_altitude) / (end_altitude-start_altitude))**.5
-            pitch_cmd =  pitch_target * k + 90 * (1-k)  # Pitch program
-            if altitude >= end_altitude:
+            pitch_cmd, complete = prog(altitude_stream())
+            if complete:
                 break
             self.vessel.auto_pilot.target_pitch_and_heading(pitch_cmd, heading)
             time.sleep(.02)

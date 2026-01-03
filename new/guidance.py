@@ -9,6 +9,31 @@ from constants import *
 # TODO: uniform across library either v/v_mag or v_vec/v
 
 
+class RollProgram():
+
+    def __init__(self, start_altitude, end_altitude, heading):
+        self.k = lambda altitude: ((altitude-start_altitude) / (end_altitude-start_altitude))**.5 * 1.1
+        self.roll = lambda k: heading * k + 90 * (1-k)
+    
+    def __call__(self, altitude):
+        k = self.k(altitude)
+        roll_cmd = self.roll(k)
+        complete = (k >= 1)
+        return roll_cmd, complete
+
+
+class PitchProgram():
+
+    def __init__(self, start_altitude, end_altitude, pitch_target):
+        self.k = lambda altitude: ((altitude-start_altitude) / (end_altitude-start_altitude))**.5
+        self.pitch = lambda k: pitch_target * k + 90 * (1-k)
+    
+    def __call__(self, altitude):
+        k = self.k(altitude)
+        pitch_cmd = self.pitch(k)
+        complete = (k >= 1)
+        return pitch_cmd, complete
+
 
 class Orbit():
 
